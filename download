@@ -1,0 +1,11 @@
+# Never commit the source data — it contains vendor records
+*.xlsx
+*.xlsm
+*.csv
+segments.json
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
