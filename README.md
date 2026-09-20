@@ -1,7 +1,8 @@
 # CNPJ Data Enrichment
 
 Enriches a spreadsheet of Brazilian company registrations (CNPJ) with public
-records from the Receita Federal, via the BrasilAPI public endpoint.
+records from the Receita Federal, queried through five independent public APIs
+with automatic failover.
 
 Built for vendor due diligence. Given a list of CNPJs, it fills in the
 registered name, trade name, registration status, primary economic activity
@@ -16,16 +17,42 @@ and copying fields into a spreadsheet. At a few hundred vendors that stops
 being viable, and manual transcription introduces exactly the kind of error
 a compliance check is supposed to catch.
 
+## Providers
+
+| Provider | Endpoint |
+|---|---|
+| BrasilAPI | `brasilapi.com.br` |
+| Minha Receita | `minhareceita.org` |
+| CNPJ.ws | `publica.cnpj.ws` |
+| CNPJA | `open.cnpja.com` |
+| ReceitaWS | `receitaws.com.br` |
+
+All five expose the same registry data in different JSON shapes. A per-provider
+adapter normalizes every response into one internal record, so adding a source
+means writing one function and one table entry, never touching the main loop.
+Providers are tried in order until one returns a usable record.
+
 ## Design notes
 
 **Resumable by default.** Only rows marked `PENDING` are processed, and the
 workbook is checkpointed every 25 rows. An interrupted run restarts without
 re-requesting what it already has.
 
-**Retries hit the same row, not the next one.** On HTTP 429 or a 5xx, the
-script backs off and retries that CNPJ up to three times. Skipping ahead on
-throttling would scatter silent gaps through the output, which is worse than
-failing: the sheet would look complete.
+**Rate limiting and refusal are handled differently.** HTTP 429 means "slow
+down", so that provider is put on a two-minute cooldown and reconsidered later.
+HTTP 403 means "no", so it is dropped for the rest of the run. Treating both as
+permanent would discard the best provider on its first busy minute.
+
+**"Not found" is never guessed.** A row is marked `NOT FOUND` only when a
+provider actually answered that the CNPJ does not exist. If every provider was
+unreachable or throttled, the row is marked `LOOKUP FAILED` instead. Writing
+`NOT FOUND` after a network failure would quietly assert that a real company
+does not exist, and that row would never be revisited.
+
+**The client identifies itself.** Requests carry a User-Agent naming this tool
+and linking to its repository, not a spoofed browser string. These are free
+public services; if one declines an honest client, the answer is to respect the
+limit, not to disguise the request.
 
 **Header validation happens upfront.** A missing column is reported before
 the first request, not as a `KeyError` forty minutes into a run.
@@ -77,6 +104,8 @@ python enrich_cnpj.py vendors.xlsx --sheet VENDORS
 | `--segments` | Path to a JSON map of CNAE prefix to segment label |
 | `--limit` | Stop after N rows. Useful for a first test run |
 
+An optional `vendor_name` column, if present, is used to label progress output.
+
 Start with `--limit 5` against a copy of the file to confirm the column
 mapping before committing to a full run.
 
@@ -101,9 +130,9 @@ Rows are processed only when `status_enrichment` is `PENDING`.
 |---|---|
 | `PENDING` | Not yet processed. The script only touches these |
 | `ENRICHED` | Record found and written |
-| `NOT FOUND` | The registry has no such CNPJ |
+| `NOT FOUND` | A provider confirmed no such CNPJ exists |
 | `INVALID CNPJ` | The cell did not contain 14 digits. No request was made |
-| `REQUEST FAILED` | Retries exhausted. Reset to `PENDING` to try again |
+| `LOOKUP FAILED` | No provider gave a definitive answer. Reset to `PENDING` to retry |
 
 ## Segment mapping
 
@@ -128,7 +157,7 @@ See `segments.example.json` for a fuller example. Longer prefixes win, so
 
 ## Tech
 
-Python, `requests`, `openpyxl`, BrasilAPI.
+Python, `requests`, `openpyxl`. Public registry APIs listed above.
 
 ## License
 
